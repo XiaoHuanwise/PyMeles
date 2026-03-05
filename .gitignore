@@ -1,0 +1,26 @@
+.*
+!.gitignore
+!.gitlab-ci.yml
+!.gitattributes
+!.clang-format
+!.clang-tidy
+!.dockerignore
+!.gitlab-ci
+# Ignore builds and ThirdParty directories
+build
+buildDebug
+builds
+ThirdParty
+# Ignore .DS_Store sometimes created by OS X.
+.DS_Store
+# for the userguide
+*.pdf
+# Kdevelop project files
+*.kdev4
+# Sublime project files
+*.sublime-project
+*.sublime-workspace
+# CLion build directories
+cmake-build-*
+# Any python cache directories
+__pycache__
