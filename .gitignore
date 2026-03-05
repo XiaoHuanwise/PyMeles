@@ -24,3 +24,7 @@ ThirdParty
 cmake-build-*
 # Any python cache directories
 __pycache__
+# for img
+*.png
+*.jpg
+*.gif
