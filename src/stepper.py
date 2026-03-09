@@ -136,7 +136,7 @@ class RungeKuttaStepperForDITR(ExplicitStepper):
         """
 
         self.K = tools.zerostorch((self.n_stages + 1, *F_ref.shape), F_ref.device)
-        self.a_view_modal = (-1,) + (1,) * (F_ref.dim() - 1)
+        self.a_view_modal = (-1,) + (1,) * F_ref.dim()
 
         def __validate_tol(self, rtol: float, atol: float) -> Tuple[float, float]:
             if (not isinstance(rtol, float)) or (not isinstance(atol, float)) or (rtol < 0) or (atol < 0):
@@ -192,6 +192,7 @@ class RungeKuttaStepperForDITR(ExplicitStepper):
             if torch.any(dt < min_step):
                 raise ValueError("dt below the min_step without enough accuracy in RK")
 
+            # Perform a single Runge-Kutta stop
             self.K[0, ...] = rhs(u)  # TODO: need improvement
             for s, (a, c) in enumerate(zip(self.A[1:], self.C[1:]), start=1):
                 view_a = a.view(self.a_view_modal)
