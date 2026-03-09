@@ -192,14 +192,21 @@ class RungeKuttaStepperForDITR(ExplicitStepper):
             if torch.any(dt < min_step):
                 raise ValueError("dt below the min_step without enough accuracy in RK")
 
-            # Perform a single Runge-Kutta stop
+            # Perform a single Runge-Kutta step
             self.K[0, ...] = rhs(u)  # TODO: need improvement
             for s, (a, c) in enumerate(zip(self.A[1:], self.C[1:]), start=1):
                 view_a = a.view(self.a_view_modal)
-                dy = torch.sum(view_a[:s, ...] * self.K[:s, ...], dim=0) * dt
-                dy[0, ...].add_(u_n_c2)
-                dy[1, ...].add_(u_n_1)
-                self.K[s, ...] = rhs(self._wrap_y_as_u(u, dy))
+                y = torch.sum(view_a[:s, ...] * self.K[:s, ...], dim=0) * dt
+                y[0, ...].add_(u_n_c2)
+                y[1, ...].add_(u_n_1)
+                self.K[s, ...] = rhs(self._wrap_y_as_u(u, y))
+
+            y_new = torch.sum(self.B.view(self.a_view_modal) * self.K[:-1, ...], dim=0) * dt
+            y_new[0, ...].add_(u_n_c2)
+            y_new[1, ...].add_(u_n_1)
+            f_new = rhs(self._wrap_y_as_u(u, y_new))
+
+            self.K[-1, ...] = f_new
 
         raise NotImplementedError
 
