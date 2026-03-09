@@ -28,4 +28,6 @@ __pycache__
 *.png
 *.jpg
 *.gif
+# for claude code
 AGENTS.md
+memory_and_plan
