@@ -200,7 +200,8 @@ class DGSystem1D:
     #     print(f"time={self.time:3f}s", end="\r")
 
     def time_step(self, dt: float) -> None:
-        self.stepper.step(self.field.u, dt, self.cal_rhs_with_u, out=self.field.u)
+        # NEED TO IMPLEMENT
+        # self.stepper._step_impl(self.field.u, dt, self.cal_rhs_with_u, out=self.field.u)
         self.time += dt
         print(f"time={self.time:3f}s", end="\r")
 
