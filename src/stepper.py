@@ -172,8 +172,30 @@ class RungeKuttaStepper(ExplicitStepper):
 
         self.error_exponent = -1.0 / (self.error_estimator_order + 1)
 
+    def _select_initial_step(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> tensor:
+        # calculate scale factor
+        scale = self.atol + torch.abs(u0) * self.rtol
+        d0 = u0 / scale
+        d1 = f0 / scale
+
+        # estimate initial step size
+        h0 = torch.where((d0 < 1e-5) | (d1 < 1e-5), 1e-6, 0.01 * d0 / d1)  # 1% of the characteristic time scale
+
+        # try one step
+        u1 = u0 + h0 * f0
+        f1 = rhs(u1)
+        d2 = (f1 - f0) / scale / h0
+
+        # final step
+        h1 = torch.where(
+            (d1 <= 1e-15) & (d2 < 1e-15),
+            torch.maximum(1e-6, h0 * 1e-3),
+            (0.01 / torch.maximum(d1, d2)) ** (-self.error_exponent),
+        )
+        return torch.minimum(torch.minimum(100 * h0, h1), self.max_step, out=dt)
+
     def _estimate_error(self, K: tensor, dt: tensor) -> tensor:
-        return torch.sum(self.E.view(self.a_view_modal) * K) * dt
+        return torch.sum(self.E.view(self.a_view_modal) * K, dim=0) * dt
 
     def _step_impl(self, u: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> None:
         """
@@ -226,26 +248,22 @@ class RungeKuttaStepper(ExplicitStepper):
             # Handle accepted DOFs: adjust dt
             factor_accept = torch.where(
                 error_norm == 0.0,
-                torch.full_like(error_norm, self.MAX_FACTOR),
+                self.MAX_FACTOR,
                 torch.minimum(self.MAX_FACTOR, self.SAFETY * (error_norm**self.error_exponent)),
             )
             # If previously rejected, limit factor <= 1
-            factor_accept = torch.where(
-                step_rejected, torch.minimum(factor_accept, torch.ones_like(factor_accept)), factor_accept
-            )
-            dt = torch.where(mask_accept, dt * factor_accept, dt)
+            torch.where(step_rejected, torch.minimum(factor_accept, 1.0), factor_accept, out=factor_accept)
+            torch.where(mask_accept, dt * factor_accept, dt, out=dt)
 
             # Handle rejected DOFs: decrease dt
             factor_reject = torch.maximum(self.MIN_FACTOR, self.SAFETY * (error_norm**self.error_exponent))
-            dt = torch.where(mask_reject, dt * factor_reject, dt)
+            torch.where(mask_reject, dt * factor_reject, dt, out=dt)
 
             # Update step states
             step_accepted.logical_or_(mask_accept)
             step_rejected.logical_or_(mask_reject)
 
         u[...] = u_new
-
-        raise NotImplementedError
 
 
 # ----------------------------------------------------------------------------------------------------------------------
