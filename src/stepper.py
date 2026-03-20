@@ -189,6 +189,11 @@ class RungeKuttaStepper(ExplicitStepper):
 
         self.error_exponent = 1.0 / (self.error_estimator_order + 1)
 
+        self.C.to(F_ref.device)
+        self.A.to(F_ref.device)
+        self.B.to(F_ref.device)
+        self.E.to(F_ref.device)
+
     def _select_initial_step(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> tensor:
         # calculate scale factor
         scale = self.atol + torch.abs(u0) * self.rtol
@@ -309,6 +314,67 @@ class RungeKuttaStepper(ExplicitStepper):
         self.u[...] = u_new
         self.f = f_new
         self.error_norm_prev = error_norm
+
+
+class RK32Stepper(RungeKuttaStepper):
+    """
+    Explicit Runge-Kutta method of order 3(2).
+
+    This uses the Bogacki-Shampine pair of formulas [1]_. The error is controlled
+    assuming accuracy of the second-order method, but steps are taken using the
+    third-order accurate formula (local extrapolation is done).
+
+    Ref by scipy.integrate._ivp.rk.py
+
+    References
+    ----------
+    .. [1] P. Bogacki, L.F. Shampine, "A 3(2) Pair of Runge-Kutta Formulas",
+           Appl. Math. Lett. Vol. 2, No. 4. pp. 321-325, 1989.
+    """
+
+    C: tensor = torch.tensor([0, 1 / 2, 3 / 4])
+    A: tensor = torch.tensor([[0, 0, 0], [1 / 2, 0, 0], [0, 3 / 4, 0]])
+    B: tensor = torch.tensor([2 / 9, 1 / 3, 4 / 9])
+    E: tensor = torch.tensor([-5 / 72, 1 / 12, 1 / 9, -1 / 8])
+
+    order: int = 3
+    error_estimator_order: int = 2
+    n_stages: int = 3
+
+
+class RK54Stepper(RungeKuttaStepper):
+    """
+    Explicit Runge-Kutta method of order 5(4).
+
+    This uses the Dormand-Prince pair of formulas [1]_. The error is controlled
+    assuming accuracy of the fourth-order method, but steps are taken using the
+    fifth-order accurate formula (local extrapolation is done).
+
+    Ref by scipy.integrate._ivp.rk.py
+
+    References
+    ----------
+    .. [1] J. R. Dormand, P. J. Prince, "A family of embedded Runge-Kutta
+           formulae", Journal of Computational and Applied Mathematics, Vol. 6,
+           No. 1, pp. 19-26, 1980.
+    """
+
+    order = 5
+    error_estimator_order = 4
+    n_stages = 6
+    C = torch.tensor([0, 1 / 5, 3 / 10, 4 / 5, 8 / 9, 1])
+    A = torch.tensor(
+        [
+            [0, 0, 0, 0, 0],
+            [1 / 5, 0, 0, 0, 0],
+            [3 / 40, 9 / 40, 0, 0, 0],
+            [44 / 45, -56 / 15, 32 / 9, 0, 0],
+            [19372 / 6561, -25360 / 2187, 64448 / 6561, -212 / 729, 0],
+            [9017 / 3168, -355 / 33, 46732 / 5247, 49 / 176, -5103 / 18656],
+        ]
+    )
+    B = torch.tensor([35 / 384, 0, 500 / 1113, 125 / 192, -2187 / 6784, 11 / 84])
+    E = torch.tensor([71 / 57600, 0, -71 / 16695, 71 / 1920, -17253 / 339200, 22 / 525, -1 / 40])
 
 
 # ----------------------------------------------------------------------------------------------------------------------
