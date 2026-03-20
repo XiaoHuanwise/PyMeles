@@ -15,6 +15,10 @@ tensor: TypeAlias = torch.Tensor
 
 
 class ExplicitStepper(ABC):
+    pass
+
+
+class SimpleExplicitStepper(ExplicitStepper):
     """
     Base class for explicit steppers.
 
@@ -25,7 +29,7 @@ class ExplicitStepper(ABC):
     """
 
     @abstractmethod
-    def _step_impl(
+    def _simple_step_impl(
         self,
         u: Union[tensor, Tuple[tensor]],
         dt: Union[float, tensor],
@@ -55,8 +59,18 @@ class ExplicitStepper(ABC):
 
         pass
 
+    def step(
+        self,
+        u: Union[tensor, Tuple[tensor]],
+        dt: Union[float, tensor],
+        rhs: Callable[[tensor], tensor],
+        *,
+        out: Optional[tensor] = None,
+    ) -> tensor:
+        return self._simple_step_impl(u, dt, rhs, out=out)
 
-class FEulerStepper(ExplicitStepper):
+
+class FEulerStepper(SimpleExplicitStepper):
     """
     Forward Euler stepper.
 
@@ -68,7 +82,7 @@ class FEulerStepper(ExplicitStepper):
         Perform a single step of the ODE.
     """
 
-    def _step_impl(
+    def _simple_step_impl(
         self, u: tensor, dt: float, rhs: Callable[[tensor], tensor], *, out: Optional[tensor] = None
     ) -> tensor:
         if out is None:
@@ -79,7 +93,7 @@ class FEulerStepper(ExplicitStepper):
         return out
 
 
-class SSPRK3Stepper(ExplicitStepper):
+class SSPRK3Stepper(SimpleExplicitStepper):
     """
     SSPRK3 stepper.
 
@@ -91,7 +105,7 @@ class SSPRK3Stepper(ExplicitStepper):
         Perform a single step of the ODE.
     """
 
-    def _step_impl(
+    def _simple_step_impl(
         self, u: tensor, dt: float, rhs: Callable[[tensor], tensor], *, out: Optional[tensor] = None
     ) -> tensor:
         if out is None:
@@ -223,7 +237,7 @@ class RungeKuttaStepper(ExplicitStepper):
 
         return u_new, f_new
 
-    def _step_impl(self) -> None:
+    def step(self) -> None:
         """
         The form of u must be same as the rhs's input.
         the form of out is (u, dt).
