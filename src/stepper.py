@@ -112,6 +112,9 @@ class RungeKuttaStepper(ExplicitStepper):
     MIN_FACTOR = 0.2  # Minimum allowed decrease in a step size.
     MAX_FACTOR = 10  # Maximum allowed increase in a step size.
 
+    ALPHA = 0.7
+    BETA = 0.4
+
     C: tensor = NotImplemented
     A: tensor = NotImplemented
     B: tensor = NotImplemented
@@ -170,7 +173,7 @@ class RungeKuttaStepper(ExplicitStepper):
 
         self.min_step, self.max_step = __validate_step_size(min_step, max_step)
 
-        self.error_exponent = -1.0 / (self.error_estimator_order + 1)
+        self.error_exponent = 1.0 / (self.error_estimator_order + 1)
 
     def _select_initial_step(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> tensor:
         # calculate scale factor
@@ -190,22 +193,46 @@ class RungeKuttaStepper(ExplicitStepper):
         h1 = torch.where(
             (d1 <= 1e-15) & (d2 < 1e-15),
             torch.maximum(1e-6, h0 * 1e-3),
-            (0.01 / torch.maximum(d1, d2)) ** (-self.error_exponent),
+            (0.01 / torch.maximum(d1, d2)) ** self.error_exponent,
         )
         return torch.minimum(torch.minimum(100 * h0, h1), self.max_step, out=dt)
+
+    def set_new_state(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> None:
+        self.u = u0
+        self.f = f0
+        self.rhs = rhs
+        self.dt = dt
+        self._select_initial_step(u0, f0, dt, rhs)
+        self.error_norm_prev = torch.ones_like(u0, dtype=u0.dtype)
 
     def _estimate_error(self, K: tensor, dt: tensor) -> tensor:
         return torch.sum(self.E.view(self.a_view_modal) * K, dim=0) * dt
 
-    def _step_impl(self, u: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> None:
+    def _rk_step(self, u: tensor, f: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> Tuple[tensor, tensor]:
+        # Perform a single Runge-Kutta step
+        self.K[0, ...] = f
+        for s, (a, _) in enumerate(zip(self.A[1:], self.C[1:]), start=1):
+            view_a = a.view(self.a_view_modal)
+            du = torch.sum(view_a[:s, ...] * self.K[:s, ...], dim=0) * dt
+            self.K[s, ...] = rhs(du.add_(u))
+
+        u_new = u + torch.sum(self.B.view(self.a_view_modal) * self.K[:-1, ...], dim=0) * dt
+        f_new = rhs(u_new)
+
+        self.K[-1, ...] = f_new
+
+        return u_new, f_new
+
+    def _step_impl(self) -> None:
         """
         The form of u must be same as the rhs's input.
         the form of out is (u, dt).
         """
-        if isinstance(dt, float):
-            dt = torch.tensor(dt, dtype=u[0].dtype, device=u[0].device)
-        if dt.shape != self.K[0].shape and dt.numel() != 1:
-            raise ValueError("dt must be a tensor with shape (1,) or shape like F_ref or a float")
+        u, f, dt, rhs = self.u, self.f, self.dt, self.rhs
+        # if isinstance(dt, float):
+        #     dt = torch.tensor(dt, dtype=u[0].dtype, device=u[0].device)
+        # if dt.shape != self.K[0].shape and dt.numel() != 1:
+        #     raise ValueError("dt must be a tensor with shape (1,) or shape like F_ref or a float")
 
         min_step, max_step = self.min_step, self.max_step
         rtol, atol = self.rtol, self.atol
@@ -219,25 +246,17 @@ class RungeKuttaStepper(ExplicitStepper):
         step_accepted = torch.zeros_like(dt, dtype=torch.bool)
         step_rejected = torch.zeros_like(dt, dtype=torch.bool)
 
+        # Apply PI control
         while not step_accepted.all():
             # Check if dt is too small for any unaccepted DOF
             if torch.any(dt < min_step):
                 raise ValueError("dt below the min_step without enough accuracy in RK")
 
             # Perform a single Runge-Kutta step
-            self.K[0, ...] = rhs(u)  # TODO: need improvement
-            for s, (a, c) in enumerate(zip(self.A[1:], self.C[1:]), start=1):
-                view_a = a.view(self.a_view_modal)
-                du = torch.sum(view_a[:s, ...] * self.K[:s, ...], dim=0) * dt
-                self.K[s, ...] = rhs(du.add_(u))
-
-            u_new = u + torch.sum(self.B.view(self.a_view_modal) * self.K[:-1, ...], dim=0) * dt
-            f_new = rhs(u_new)
-
-            self.K[-1, ...] = f_new
+            u_new, f_new = self._rk_step(u, f, dt, rhs)
 
             scale = atol + torch.maximum(torch.abs(u), torch.abs(u_new)) * rtol
-            error_norm = self._estimate_error(self.K, dt) / scale
+            error_norm = self._estimate_error(self.K, dt).abs_() / scale
 
             # Only update the DOFs that were not accepted
             mask = not step_accepted
@@ -249,21 +268,33 @@ class RungeKuttaStepper(ExplicitStepper):
             factor_accept = torch.where(
                 error_norm == 0.0,
                 self.MAX_FACTOR,
-                torch.minimum(self.MAX_FACTOR, self.SAFETY * (error_norm**self.error_exponent)),
+                torch.minimum(
+                    self.MAX_FACTOR,
+                    self.SAFETY
+                    * (error_norm ** (-self.ALPHA * self.error_exponent))
+                    * (self.error_norm_prev ** (self.BETA * self.error_exponent)),
+                ),
             )
             # If previously rejected, limit factor <= 1
             torch.where(step_rejected, torch.minimum(factor_accept, 1.0), factor_accept, out=factor_accept)
             torch.where(mask_accept, dt * factor_accept, dt, out=dt)
 
             # Handle rejected DOFs: decrease dt
-            factor_reject = torch.maximum(self.MIN_FACTOR, self.SAFETY * (error_norm**self.error_exponent))
+            factor_reject = torch.maximum(
+                self.MIN_FACTOR,
+                self.SAFETY
+                * (error_norm ** (-self.ALPHA * self.error_exponent))
+                * (self.error_norm_prev ** (self.BETA * self.error_exponent)),
+            )
             torch.where(mask_reject, dt * factor_reject, dt, out=dt)
 
             # Update step states
             step_accepted.logical_or_(mask_accept)
             step_rejected.logical_or_(mask_reject)
 
-        u[...] = u_new
+        self.u[...] = u_new
+        self.f = f_new
+        self.error_norm_prev = error_norm
 
 
 # ----------------------------------------------------------------------------------------------------------------------
