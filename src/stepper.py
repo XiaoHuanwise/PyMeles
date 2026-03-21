@@ -1,4 +1,5 @@
 import functools
+import warnings
 from abc import ABC, abstractmethod
 from typing import Callable, Optional, Tuple, TypeAlias, Union
 
@@ -30,19 +31,14 @@ class SimpleExplicitStepper(ExplicitStepper):
 
     @abstractmethod
     def _simple_step_impl(
-        self,
-        u: Union[tensor, Tuple[tensor]],
-        dt: Union[float, tensor],
-        rhs: Callable[[tensor], tensor],
-        *,
-        out: Optional[tensor] = None,
+        self, u: tensor, dt: float, rhs: Callable[[tensor], tensor], *, out: Optional[tensor] = None
     ) -> tensor:
         """
         Perform a single step of the ODE.
 
         Args
         ----
-        u : torch.Tensor or Tunple[torch.Tensor]
+        u : torch.Tensor
             The current state of the system.
         dt : float
             The time step size.
@@ -59,14 +55,7 @@ class SimpleExplicitStepper(ExplicitStepper):
 
         pass
 
-    def step(
-        self,
-        u: Union[tensor, Tuple[tensor]],
-        dt: Union[float, tensor],
-        rhs: Callable[[tensor], tensor],
-        *,
-        out: Optional[tensor] = None,
-    ) -> tensor:
+    def step(self, u: tensor, dt: float, rhs: Callable[[tensor], tensor], *, out: Optional[tensor] = None) -> tensor:
         return self._simple_step_impl(u, dt, rhs, out=out)
 
 
@@ -396,8 +385,11 @@ class ImplicitStepper(ABC):
         self.rhs: Callable[[tensor], tensor] = rhs
 
     @abstractmethod
-    def trhs(self, u: Tuple[tensor], dt: float) -> tensor:
+    def _trhs_impl(self, u_prev: Optional[tensor], u_n: tensor, u_new: tensor, dt: float) -> tensor:
         pass
+
+    def trhs(self, u_prev: Optional[tensor], u_n: tensor, u_new: tensor, dt: float) -> tensor:
+        return self._trhs_impl(u_prev, u_n, u_new, dt)
 
 
 class DITRStepper(ImplicitStepper):
@@ -427,9 +419,6 @@ class DITRStepper(ImplicitStepper):
     def _mul_P(self, F: tensor) -> None:
         F[0, :].add_(F[1, :], alpha=self.beta)
 
-    def get_wrap_trhs(self, dt: float) -> Callable[[tensor], tensor]:
-        return functools.partial(self.trhs, dt=dt)
-
 
 class DITRU2R2Stepper(DITRStepper):
     """
@@ -458,14 +447,17 @@ class DITRU2R2Stepper(DITRStepper):
         self.beta = beta
         self.F = tools.zerostorch((2, *u_ref.shape), u_ref.device)
 
-    def trhs(self, u: Tuple[tensor], dt: float) -> tensor:
+    def _trhs_impl(self, u_prev: Optional[tensor], u_n: tensor, u_new: tensor, dt: float) -> tensor:
         """
         The temporal rhs of a single implicit step of the ODE using the DITR U2R2 method.
 
-        The form of u should be (u_{n}, tensor[u_{n+c2}, u_{n+1}])
+        The form of u_prev, u_n, u_new should be u_{n-1}, u_{n}, tensor[u_{n+c2}, u_{n+1}]
+
+        In U2R2, u_prev is not used.
         """
 
-        u_n, u_n_c2, u_n_1 = u[0], u[1][0, ...], u[1][1, ...]
+        del u_prev
+        u_n_c2, u_n_1 = u_new[0, ...], u_new[1, ...]
         # F_n_c2
         self.F[0, ...] = (
             (self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt
@@ -478,3 +470,110 @@ class DITRU2R2Stepper(DITRStepper):
         )
         self._mul_P(self.F)
         return self.F
+
+
+class DualStepper:
+    def __init__(
+        self,
+        phy_stepper: ImplicitStepper,
+        pseudo_stepper: ExplicitStepper,
+        u_ref: tensor,
+        atol: float = 1e-6,
+        rtol: float = 1e-3,
+        max_pseudo_steps: int = 100,
+    ):
+        """
+        Dual stepper for solving ODEs.
+        It is used to solve ODEs with a dual stepper.
+
+        Args
+        ----
+        phy_stepper : ImplicitStepper
+            The physical stepper for solving the ODE.
+        pseudo_stepper : ExplicitStepper
+            The pseudo stepper for solving the ODE.
+        u_ref : torch.Tensor
+            The reference state of the system.
+        atol : float, optional
+            The absolute tolerance for the pseudo stepper, by default 1e-6
+        rtol : float, optional
+            The relative tolerance for the pseudo stepper, by default 1e-3
+
+        """
+        self.phy_stepper = phy_stepper
+        self.pseudo_stepper = pseudo_stepper
+        self.atol = atol
+        self.rtol = rtol
+        self.max_pseudo_steps = max_pseudo_steps
+
+        if isinstance(phy_stepper, DITRStepper):
+            self.u_new = tools.emptytorch((2, *u_ref.shape), u_ref.device)
+        else:
+            raise NotImplementedError("Only DITR stepper is supported for dual stepper's phy_stepper.")
+
+        self.pseudo_dt = torch.empty_like(u_ref)
+        self.u_prev_needed = False
+
+    def _not_converged(self, f_norm: float, f0_norm: float) -> bool:
+        return (f_norm / f0_norm > self.rtol) and (f_norm > self.atol)
+
+    def step(
+        self,
+        u: tensor,
+        dt: float,
+        *,
+        out: Optional[tensor] = None,
+        u_prev: Optional[tensor] = None,
+    ) -> tensor:
+        """
+        Perform a single implicit step of the ODE by using the dual stepper.
+
+        Args
+        ----
+        u : torch.Tensor
+            The current state of the system.
+        dt : float
+            The time step size.
+        out : Optional[torch.Tensor]
+            The output tensor to store the result, by default None
+        u_prev : Optional[torch.Tensor]
+            The previous step state of the system.
+
+        Returns
+        -------
+        tensor
+            The state of the system after the step.
+        """
+        if (u_prev is None) and self.u_prev_needed:
+            raise ValueError("u_prev is needed for this stepper.")
+
+        pseudo_rhs = functools.partial(self.phy_stepper.trhs, u_prev=u_prev, u_n=u, dt=dt)
+
+        if isinstance(self.pseudo_stepper, DITRStepper):
+            self.u_new[0, ...] = u
+            self.u_new[1, ...] = u
+        else:
+            raise NotImplementedError("Only DITR stepper is supported for dual stepper's phy_stepper.")
+
+        u0 = self.u_new
+        f0 = pseudo_rhs(u0)
+
+        if isinstance(self.pseudo_stepper, RungeKuttaStepper):
+            self.pseudo_stepper.set_new_state(u0, f0, self.pseudo_dt, pseudo_rhs)
+        else:
+            raise NotImplementedError("Only RungeKutta stepper is supported for dual stepper's pseudo_stepper.")
+
+        f = self.pseudo_stepper.f
+        f0_norm = torch.norm(f0.view(-1), p=2)
+        f_norm = torch.norm(f.view(-1), p=2)
+        cnt = 0
+        while self._not_converged(f_norm, f0_norm) and cnt < self.max_pseudo_steps:
+            self.pseudo_stepper.step()
+            cnt += 1
+            f_norm = torch.norm(f.view(-1), p=2)
+
+        if self._not_converged(f_norm, f0_norm) and cnt >= self.max_pseudo_steps:
+            warnings.warn("pseudo stepper touched max steps.")
+
+        out[...] = self.u_new[1, ...]
+        return out
