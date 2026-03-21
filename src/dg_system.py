@@ -1,8 +1,10 @@
+from typing import Union
+
 import matplotlib.pyplot as plt
 import torch
 
 from src.field import DGField1D
-from src.stepper import ExplicitStepper
+from src.stepper import DualStepper, ExplicitStepper, RungeKuttaStepper, SimpleExplicitStepper
 
 
 class SystemOperator1D:
@@ -122,7 +124,7 @@ class SystemOperator1D:
 
 
 class DGSystem1D:
-    def __init__(self, field: DGField1D, sys_op: SystemOperator1D, stepper: ExplicitStepper):
+    def __init__(self, field: DGField1D, sys_op: SystemOperator1D, stepper: Union[ExplicitStepper, DualStepper]):
         self._mesh = field.mesh
         self._basis = field.basis
 
@@ -131,6 +133,7 @@ class DGSystem1D:
         self.stepper = stepper
         self.time = 0.0
         self.rhs = torch.zeros_like(field.u)
+        self.u_prev = field.u.clone()
 
     def cal_rhs_with_u(self, u: torch.Tensor) -> torch.Tensor:
         flux = self.field.get_u_quad_with_u(u)
@@ -185,24 +188,17 @@ class DGSystem1D:
         plt.legend()
         plt.title(f"time={self.time:3f}s")
 
-    # def eular_step(self, dt: float) -> None:
-    #     # self.field.add2u(dt * self.cal_rhs_with_u(self.field.u))
-    #     self.field.u[...] = self.field.u + dt * self.cal_rhs_with_u(self.field.u)
-    #     self.time += dt
-    #     print(f"time={self.time:3f}s", end="\r")
-
-    # def ssprk3_step(self, dt: float) -> None:
-    #     u0 = self.field.u
-    #     u1 = u0 + dt * self.cal_rhs_with_u(u0)
-    #     u2 = 3.0 / 4.0 * u0 + 1.0 / 4.0 * u1 + 1.0 / 4.0 * dt * self.cal_rhs_with_u(u1)
-    #     self.field.u[...] = 1.0 / 3.0 * u0 + 2.0 / 3.0 * u2 + 2.0 / 3.0 * dt * self.cal_rhs_with_u(u2)
-    #     self.time += dt
-    #     print(f"time={self.time:3f}s", end="\r")
-
     def time_step(self, dt: float) -> None:
-        # NEED TO IMPLEMENT
-        # self.stepper._step_impl(self.field.u, dt, self.cal_rhs_with_u, out=self.field.u)
+        if isinstance(self.stepper, SimpleExplicitStepper):
+            self.stepper.step(self.field.u, dt, self.cal_rhs_with_u, out=self.field.u)
+        elif isinstance(self.stepper, DualStepper):
+            self.stepper.step(self.field.u, dt, out=self.field.u, u_prev=self.u_prev)
+        elif isinstance(self.stepper, RungeKuttaStepper):
+            self.stepper.step()
+        else:
+            raise ValueError("stepper must be ExplicitStepper or DualStepper")
         self.time += dt
+        self.u_prev[...] = self.field.u
         print(f"time={self.time:3f}s", end="\r")
 
     def __repr__(self):
