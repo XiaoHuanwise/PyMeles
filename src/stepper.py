@@ -472,6 +472,11 @@ class DITRU2R2Stepper(DITRStepper):
         return self.F
 
 
+# ----------------------------------------------------------------------------------------------------------------------
+# Dual Steppers
+# ----------------------------------------------------------------------------------------------------------------------
+
+
 class DualStepper:
     def __init__(
         self,
@@ -505,6 +510,7 @@ class DualStepper:
         self.atol = atol
         self.rtol = rtol
         self.max_pseudo_steps = max_pseudo_steps
+        self.REF_STEP = 5  # Magic number from fluent
 
         if isinstance(phy_stepper, DITRStepper):
             self.u_new = tools.emptytorch((2, *u_ref.shape), u_ref.device)
@@ -564,13 +570,15 @@ class DualStepper:
             raise NotImplementedError("Only RungeKutta stepper is supported for dual stepper's pseudo_stepper.")
 
         f = self.pseudo_stepper.f
-        f0_norm = torch.norm(f0.view(-1), p=2)
-        f_norm = torch.norm(f.view(-1), p=2)
+        f0_norm = torch.norm(f0.view(-1), p=2) / (f0.numel() ** 0.5)
+        f_norm = torch.norm(f.view(-1), p=2) / (f.numel() ** 0.5)
         cnt = 0
         while self._not_converged(f_norm, f0_norm) and cnt < self.max_pseudo_steps:
             self.pseudo_stepper.step()
             cnt += 1
-            f_norm = torch.norm(f.view(-1), p=2)
+            f_norm = torch.norm(f.view(-1), p=2) / (f.numel() ** 0.5)
+            if cnt <= self.REF_STEP:
+                f0_norm = max(f0_norm, f_norm)
 
         if self._not_converged(f_norm, f0_norm) and cnt >= self.max_pseudo_steps:
             warnings.warn("pseudo stepper touched max steps.")
