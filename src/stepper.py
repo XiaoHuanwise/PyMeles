@@ -779,6 +779,61 @@ class DITRU2R1Stepper(DITRStepper):
         return self.F.clone()
 
 
+class DITRU3R1Stepper(DITRStepper):
+    """
+    DITR U3R1 stepper.
+
+    Functions
+    ---------
+    trhs(u, dt) -> tensor
+        The temporal rhs of a single implicit step of the ODE using the DITR U2R1 method.
+    """
+
+    def __init__(
+        self, rhs: Callable[[tensor], tensor], u_ref: tensor, c2: float = 0.5, theta: float = 1.0, beta: float = 1.0
+    ):
+        super().__init__(rhs)
+        self.c2 = c2
+        self.theta = theta
+        self._set_b(u_ref, c2)
+        self.a = torch.tensor(
+            [
+                -(c2 * ((c2 - 1) ** 2)) / (theta * ((theta + 1) ** 2)),
+                ((theta + c2) * ((c2 - 1) ** 2)) / theta,
+                (c2 * (-(theta**2) * c2 + 2 * (theta**2) - theta * (c2**2) + 3 * theta - 2 * (c2**2) + 3 * c2))
+                / ((theta + 1) ** 2),
+            ],
+            dtype=u_ref.dtype,
+            device=u_ref.device,
+        )
+        self.d = torch.tensor(
+            [0, 0, (c2 * (theta + c2) * (c2 - 1)) / (theta + 1)],
+            dtype=u_ref.dtype,
+            device=u_ref.device,
+        )
+        self.beta = beta
+        self.F = tools.zerostorch((2, *u_ref.shape), u_ref.device)
+
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
+        """
+        The temporal rhs of a single implicit step of the ODE using the DITR U2R1 method.
+
+        The form of u_new, u_n, u_prev  should be tensor[u_{n+c2}, u_{n+1}], u_{n}, u_{n-1}.
+
+        In U2R1, u_prev is not used.
+        """
+
+        u_n_c2, u_n_1 = u_new[0, ...], u_new[1, ...]
+        f_n_c2 = self.rhs(u_n_c2)
+        f_n_1 = self.rhs(u_n_1)
+        # F_n_c2
+        self.F[0, ...] = (self.a[0] * u_prev + self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt + self.d[2] * f_n_1
+        # F_n_1
+        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * f_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
+        self._mul_P(self.F)
+        return self.F.clone()
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 # Dual Steppers
 # ----------------------------------------------------------------------------------------------------------------------
