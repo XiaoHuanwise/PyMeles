@@ -124,7 +124,9 @@ class SystemOperator1D:
 
 
 class DGSystem1D:
-    def __init__(self, field: DGField1D, sys_op: SystemOperator1D, stepper: Union[ExplicitStepper, DualStepper]):
+    def __init__(
+        self, field: DGField1D, sys_op: SystemOperator1D, stepper: ExplicitStepper | DualStepper | None = None
+    ):
         self._mesh = field.mesh
         self._basis = field.basis
 
@@ -135,6 +137,9 @@ class DGSystem1D:
         self.rhs = torch.zeros_like(field.u)
         self.u_prev = field.u.clone()
 
+    def set_stepper(self, stepper: Union[ExplicitStepper, DualStepper]) -> None:
+        self.stepper = stepper
+
     def cal_rhs_with_u(self, u: torch.Tensor) -> torch.Tensor:
         flux = self.field.get_u_quad_with_u(u)
         self.sys_op.flux_conv_1d(flux, flux)
@@ -144,8 +149,11 @@ class DGSystem1D:
         # -> (num_cells, num_vars, num_basis, 1)
         torch.matmul(self._basis.V1T_W, flux.unsqueeze(-1), out=self.rhs.unsqueeze(-1))
         # face integral
-        self.field.set_u_face_lr()
-        self.field.set_transmission_bd_cond()
+        self.field.set_u_face_lr_with_u(u)
+        if self.field.mesh.periodic:
+            self.field.set_periodic_bd_cond()
+        else:
+            self.field.set_transmission_bd_cond()
         self.sys_op.local_lax_friedrichs_flux_1d(self.field.u_face_lr, self.field.face_fc)
         self.rhs.index_add_(
             0,
@@ -171,7 +179,7 @@ class DGSystem1D:
         self.rhs /= self._mesh.jacobians.unsqueeze(-1).unsqueeze(-1)
         if self.rhs.isnan().any():
             raise ValueError("RHS contains nan")
-        return self.rhs
+        return self.rhs.clone()
 
     def plot_field(self):
         x = self.field.field_g_x_quand
@@ -180,8 +188,10 @@ class DGSystem1D:
         u = phy_vars[..., 1, :].flatten().numpy()
         p = phy_vars[..., 2, :].flatten().numpy()
         plt.clf()
+        # plt.xlim(0, 1.0)
+        # plt.ylim(-0.2, 1.2)
         plt.xlim(0, 1.0)
-        plt.ylim(-0.2, 1.2)
+        plt.ylim(0.5, 1.5)
         plt.plot(x, rho, label="rho", color="k")
         plt.plot(x, u, label="u", color="r")
         plt.plot(x, p, label="p", color="b")
@@ -198,7 +208,6 @@ class DGSystem1D:
         else:
             raise ValueError("stepper must be ExplicitStepper or DualStepper")
         self.time += dt
-        self.u_prev[...] = self.field.u
         print(f"time={self.time:3f}s", end="\r")
 
     def __repr__(self):

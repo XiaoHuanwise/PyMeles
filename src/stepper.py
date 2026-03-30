@@ -112,8 +112,9 @@ class RungeKuttaStepper(ExplicitStepper):
     # Multiply steps computed from asymptotic behaviour of errors by this.
     SAFETY = 0.9
 
-    MIN_FACTOR = 0.2  # Minimum allowed decrease in a step size.
-    MAX_FACTOR = 10  # Maximum allowed increase in a step size.
+    MIN_FACTOR = 0.01  # Minimum allowed decrease in a step size.
+    MAX_FACTOR = 5  # Maximum allowed increase in a step size.
+    MAX_GROWTH = 10.0
 
     ALPHA = 0.7
     BETA = 0.4
@@ -129,7 +130,7 @@ class RungeKuttaStepper(ExplicitStepper):
     def __init__(
         self,
         F_ref: tensor,
-        rtol: float = 1e-3,
+        rtol: float = 1e-6,
         atol: float = 1e-6,
         min_step: float = 10 * 2**-52,
         max_step: float = float("inf"),
@@ -142,9 +143,9 @@ class RungeKuttaStepper(ExplicitStepper):
         F_ref : tensor
             The reference tensor of F for shape.
         rtol : float
-            The relative tolerance, by default 1e-3
+            The relative tolerance, by default 1e-6
         atol : float
-            The absolute tolerance, by default 1e-6
+            The absolute tolerance, by default 1e-8
         min_step : float
             The minimum step size, by default 10 * 2**-52
         max_step : float
@@ -154,17 +155,17 @@ class RungeKuttaStepper(ExplicitStepper):
         self.K = tools.zerostorch((self.n_stages + 1, *F_ref.shape), F_ref.device)
         self.a_view_modal = (-1,) + (1,) * F_ref.dim()
 
-        def __validate_tol(self, rtol: float, atol: float) -> Tuple[float, float]:
+        def __validate_tol(rtol: float, atol: float) -> Tuple[float, float]:
             if (not isinstance(rtol, float)) or (not isinstance(atol, float)) or (rtol < 0) or (atol < 0):
                 raise ValueError("rtol and atol must be positive floats")
-            EPS = 2**-52
-            if rtol < 100 * EPS:
-                raise ValueError(f"rtol must be greater than {100 * EPS}")
+            # EPS = 2**-52
+            # if rtol < 100 * EPS:
+            #     raise ValueError(f"rtol must be greater than {100 * EPS}")
             return rtol, atol
 
         self.rtol, self.atol = __validate_tol(rtol, atol)
 
-        def __validate_step_size(self, min_step: float, max_step: float) -> Tuple[float, float]:
+        def __validate_step_size(min_step: float, max_step: float) -> Tuple[float, float]:
             if (
                 (not isinstance(min_step, float))
                 or (not isinstance(max_step, float))
@@ -183,40 +184,50 @@ class RungeKuttaStepper(ExplicitStepper):
         self.B.to(F_ref.device)
         self.E.to(F_ref.device)
 
-    def _select_initial_step(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> tensor:
-        # calculate scale factor
-        scale = self.atol + torch.abs(u0) * self.rtol
-        d0 = u0 / scale
-        d1 = f0 / scale
+    def _cal_RMS(self, u: tensor) -> tensor:
+        return u.view(-1).norm(p=2) / (u.numel() ** 0.5)
 
-        # estimate initial step size
-        h0 = torch.where((d0 < 1e-5) | (d1 < 1e-5), 1e-6, 0.01 * d0 / d1)  # 1% of the characteristic time scale
+    # def _select_initial_step(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> tensor:
+    #     # calculate scale factor
+    #     scale = self.atol + torch.abs(u0) * self.rtol
+    #     # scale = self.atol + self._cal_RMS(u0) * self.rtol
+    #     scale[scale < 1e-14] = 1e-14
+    #     d0 = u0 / scale
+    #     d1 = f0 / scale
 
-        # try one step
-        u1 = u0 + h0 * f0
-        f1 = rhs(u1)
-        d2 = (f1 - f0) / scale / h0
+    #     # estimate initial step size
+    #     h0 = torch.where((d0 < 1e-5) | (d1 < 1e-5), 1e-6, 0.01 * d0 / d1)  # 1% of the characteristic time scale
 
-        # final step
-        h1 = torch.where(
-            (d1 <= 1e-15) & (d2 < 1e-15),
-            torch.maximum(1e-6, h0 * 1e-3),
-            (0.01 / torch.maximum(d1, d2)) ** self.error_exponent,
-        )
-        return torch.minimum(torch.minimum(100 * h0, h1), self.max_step, out=dt)
+    #     # try one step
+    #     u1 = u0 + h0 * f0
+    #     f1 = rhs(u1)
+    #     d2 = (f1 - f0) / scale / h0
+
+    #     # final step
+    #     h1 = torch.where(
+    #         (d1 <= 1e-15) & (d2 <= 1e-15),
+    #         torch.maximum(torch.full_like(h0, 1e-6), h0 * 1e-3),
+    #         (0.01 / torch.maximum(d1, d2)) ** self.error_exponent,
+    #     )
+    #     return torch.minimum(torch.minimum(100 * h0, h1), torch.full_like(h0, self.max_step), out=dt)
 
     def set_new_state(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> None:
         self.u = u0
         self.f = f0
         self.rhs = rhs
+        # self._select_initial_step(u0, f0, dt, rhs)
+        single_dt = self._select_initial_step_sdt(u0, f0, rhs)
+        dt.fill_(single_dt)
         self.dt = dt
-        self._select_initial_step(u0, f0, dt, rhs)
+        self.init_dt = dt.clone()
         self.error_norm_prev = torch.ones_like(u0, dtype=u0.dtype)
 
     def _estimate_error(self, K: tensor, dt: tensor) -> tensor:
         return torch.sum(self.E.view(self.a_view_modal) * K, dim=0) * dt
 
-    def _rk_step(self, u: tensor, f: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> Tuple[tensor, tensor]:
+    def _rk_step(
+        self, u: tensor, f: tensor, dt: tensor | float, rhs: Callable[[tensor], tensor]
+    ) -> Tuple[tensor, tensor]:
         # Perform a single Runge-Kutta step
         self.K[0, ...] = f
         for s, (a, _) in enumerate(zip(self.A[1:], self.C[1:]), start=1):
@@ -237,10 +248,6 @@ class RungeKuttaStepper(ExplicitStepper):
         the form of out is (u, dt).
         """
         u, f, dt, rhs = self.u, self.f, self.dt, self.rhs
-        # if isinstance(dt, float):
-        #     dt = torch.tensor(dt, dtype=u[0].dtype, device=u[0].device)
-        # if dt.shape != self.K[0].shape and dt.numel() != 1:
-        #     raise ValueError("dt must be a tensor with shape (1,) or shape like F_ref or a float")
 
         min_step, max_step = self.min_step, self.max_step
         rtol, atol = self.rtol, self.atol
@@ -250,59 +257,175 @@ class RungeKuttaStepper(ExplicitStepper):
         if torch.any(dt > max_step):
             torch.minimum(dt, torch.tensor(max_step, dtype=dt.dtype, device=dt.device), out=dt)
 
-        # Initialize accept/reject states
-        step_accepted = torch.zeros_like(dt, dtype=torch.bool)
-        step_rejected = torch.zeros_like(dt, dtype=torch.bool)
+        # Apply PI control
+        # while not step_accepted.all():
+        # Check if dt is too small for any unaccepted DOF
+        if torch.any(dt < min_step):
+            raise ValueError("dt below the min_step without enough accuracy in RK")
+
+        # Perform a single Runge-Kutta step
+        u_new, f_new = self._rk_step(u, f, dt, rhs)
+
+        # scale = atol + torch.maximum(torch.abs(f), torch.abs(f_new)) * rtol
+        # # scale = atol + torch.maximum(self._cal_RMS(f), self._cal_RMS(f_new)) * rtol
+        # scale[scale <= 1e-14] = 1e-14
+        # error_norm = self._estimate_error(self.K, dt).abs_() / scale
+        # error_norm[error_norm <= 1e-14] = 1e-14
+
+        scale = (
+            (
+                atol
+                + torch.maximum(
+                    f.flatten(start_dim=-2).norm(p=2, dim=-1) / (f.flatten(start_dim=-2).shape[-1] ** 0.5),
+                    f_new.flatten(start_dim=-2).norm(p=2, dim=-1) / (f_new.flatten(start_dim=-2).shape[-1] ** 0.5),
+                )
+                * rtol
+            )
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+        )
+        scale[scale <= 1e-14] = 1e-14
+        error_norm = (
+            (
+                (self._estimate_error(self.K, dt) / scale).flatten(start_dim=-2).norm(p=2, dim=-1)
+                / (f.flatten(start_dim=-2).shape[-1] ** 0.5)
+            )
+            .unsqueeze(-1)
+            .unsqueeze(-1)
+        )
+        error_norm[error_norm <= 1e-14] = 1e-14
+
+        # print(
+        #     error_norm[error_norm > 1].numel(),
+        #     error_norm.max().item(),
+        #     error_norm.min().item(),
+        #     error_norm.norm(p=2).item() / (error_norm.numel() ** 0.5),
+        # )
+
+        factor = (
+            self.SAFETY
+            * (error_norm ** (-self.ALPHA * self.error_exponent))
+            * (self.error_norm_prev ** (self.BETA * self.error_exponent))
+        )
+
+        factor[factor > self.MAX_FACTOR] = self.MAX_FACTOR
+        factor[factor < self.MIN_FACTOR] = self.MIN_FACTOR
+
+        dt.mul_(factor)
+
+        torch.minimum(dt, self.MAX_GROWTH * self.init_dt, out=dt)
+        torch.maximum(dt, self.init_dt / self.MAX_GROWTH, out=dt)
+
+        self.u[...] = u_new
+        self.f = f_new
+        self.error_norm_prev = error_norm
+
+    def _select_initial_step_sdt(self, u0: tensor, f0: tensor, rhs: Callable[[tensor], tensor]) -> tensor:
+        # calculate scale factor
+        scale = self.atol + self._cal_RMS(u0) * self.rtol
+        d0 = self._cal_RMS(u0 / scale)
+        d1 = self._cal_RMS(f0 / scale)
+
+        # estimate initial step size
+        h0 = 1e-6 if (d0 < 1e-5) or (d1 < 1e-5) else 0.01 * d0 / d1  # 1% of the characteristic time scale
+
+        # try one step
+        u1 = u0 + h0 * f0
+        f1 = rhs(u1)
+        d2 = self._cal_RMS((f1 - f0) / scale) / h0
+
+        # final step
+        h1 = torch.where(
+            (d1 <= 1e-15) & (d2 < 1e-15),
+            torch.maximum(torch.full_like(h0, 1e-6), h0 * 1e-3),
+            (0.01 / torch.maximum(d1, d2)) ** self.error_exponent,
+        )
+        h1 = max(1e-6, h0 * 1e-3) if (d1 <= 1e-15) and (d2 <= 1e-15) else (0.01 / max(d1, d2)) ** self.error_exponent
+        self.dt = min(100 * h0, h1, self.max_step)
+        return self.dt
+
+    def set_new_state_sdt(self, u0: tensor, f0: tensor, rhs: Callable[[tensor], tensor]) -> None:
+        self.u = u0
+        self.f = f0
+        self.rhs = rhs
+        self.dt = None
+        self._select_initial_step_sdt(u0, f0, rhs)
+        self.init_dt = self.dt
+        self.error_norm_prev = 1.0
+
+    def step_single_dt(self) -> None:
+        """
+        The form of u must be same as the rhs's input.
+        the form of out is (u, dt).
+        """
+        u, f, dt, rhs = self.u, self.f, self.dt, self.rhs
+
+        min_step, max_step = self.min_step, self.max_step
+        rtol, atol = self.rtol, self.atol
+
+        dt = max(dt, min_step)
+        dt = min(dt, max_step)
+
+        # # Initialize accept/reject states
+        # step_accepted = False
+        # step_rejected = False
 
         # Apply PI control
-        while not step_accepted.all():
-            # Check if dt is too small for any unaccepted DOF
-            if torch.any(dt < min_step):
-                raise ValueError("dt below the min_step without enough accuracy in RK")
+        # while not step_accepted:
+        # Check if dt is too small for any unaccepted DOF
+        if dt < min_step:
+            raise ValueError("dt below the min_step without enough accuracy in RK")
 
-            # Perform a single Runge-Kutta step
-            u_new, f_new = self._rk_step(u, f, dt, rhs)
+        # Perform a single Runge-Kutta step
+        u_new, f_new = self._rk_step(u, f, dt, rhs)
 
-            scale = atol + torch.maximum(torch.abs(u), torch.abs(u_new)) * rtol
-            error_norm = self._estimate_error(self.K, dt).abs_() / scale
+        scale = atol + torch.maximum(self._cal_RMS(f), self._cal_RMS(f_new)) * rtol
+        error_norm = self._cal_RMS(self._estimate_error(self.K, dt) / scale)
 
-            # Only update the DOFs that were not accepted
-            mask = not step_accepted
-            # Compute accept and reject masks
-            mask_accept = mask & (error_norm < 1.0)
-            mask_reject = mask & (error_norm >= 1.0)
-
-            # Handle accepted DOFs: adjust dt
-            factor_accept = torch.where(
-                error_norm == 0.0,
-                self.MAX_FACTOR,
-                torch.minimum(
+        if error_norm < 1.0:
+            if error_norm == 0.0:
+                factor = self.MAX_FACTOR
+            else:
+                factor = min(
                     self.MAX_FACTOR,
                     self.SAFETY
                     * (error_norm ** (-self.ALPHA * self.error_exponent))
                     * (self.error_norm_prev ** (self.BETA * self.error_exponent)),
-                ),
-            )
-            # If previously rejected, limit factor <= 1
-            torch.where(step_rejected, torch.minimum(factor_accept, 1.0), factor_accept, out=factor_accept)
-            torch.where(mask_accept, dt * factor_accept, dt, out=dt)
+                )
 
-            # Handle rejected DOFs: decrease dt
-            factor_reject = torch.maximum(
+            dt *= factor
+
+            # if step_rejected:
+            #     factor = min(factor, 1.0)
+
+            # step_accepted = True
+        else:
+            dt *= max(
                 self.MIN_FACTOR,
                 self.SAFETY
                 * (error_norm ** (-self.ALPHA * self.error_exponent))
                 * (self.error_norm_prev ** (self.BETA * self.error_exponent)),
             )
-            torch.where(mask_reject, dt * factor_reject, dt, out=dt)
+            # step_rejected = True
 
-            # Update step states
-            step_accepted.logical_or_(mask_accept)
-            step_rejected.logical_or_(mask_reject)
+        dt = min(dt, self.MAX_GROWTH * self.init_dt)
 
         self.u[...] = u_new
         self.f = f_new
         self.error_norm_prev = error_norm
+
+    def step_set_sdt(self, dt) -> None:
+        """
+        The form of u must be same as the rhs's input.
+        the form of out is (u, dt).
+        """
+        u, f, rhs = self.u, self.f, self.rhs
+
+        # Perform a single Runge-Kutta step
+        u_new, f_new = self._rk_step(u, f, dt, rhs)
+
+        self.u[...] = u_new
+        self.f = f_new
 
 
 class RK32Stepper(RungeKuttaStepper):
@@ -366,6 +489,129 @@ class RK54Stepper(RungeKuttaStepper):
     E = torch.tensor([71 / 57600, 0, -71 / 16695, 71 / 1920, -17253 / 339200, 22 / 525, -1 / 40])
 
 
+class SSPRK221Stepper(RungeKuttaStepper):
+    """
+    Explicit SSP Runge-Kutta method of order (2,2)(1).
+
+    This uses the Shu-Osher pair of formulas [1]_. The error is controlled
+    assuming accuracy of the fourth-order method, but steps are taken using the
+    fifth-order accurate formula (local extrapolation is done).
+
+    References
+    ----------
+    .. [1] Imre Fekete, Sidafa Conde, John N. Shadid,
+           Embedded pairs for optimal explicit strong stability preserving Runge-Kutta methods,
+           Journal of Computational and Applied Mathematics, Volume 412, 2022
+    """
+
+    order = 2
+    error_estimator_order = 1
+    n_stages = 2
+    C = torch.tensor([0, 1.0])
+    A = torch.tensor(
+        [
+            [0],
+            [1.0],
+        ]
+    )
+    B = torch.tensor([0.5, 0.5])
+    # E = torch.tensor([0.5 - 3 / 4, 0.5 - 1 / 4, 0])
+    E = torch.tensor([0.5 - 0.694021459207626, 0.5 - 0.305978540792374, 0])
+
+
+class SSPRK321Stepper(RungeKuttaStepper):
+    """
+    Explicit SSP Runge-Kutta method of order (3,2)(1).
+
+    This uses the Shu-Osher pair of formulas [1]_. The error is controlled
+    assuming accuracy of the fourth-order method, but steps are taken using the
+    fifth-order accurate formula (local extrapolation is done).
+
+    References
+    ----------
+    .. [1] Imre Fekete, Sidafa Conde, John N. Shadid,
+           Embedded pairs for optimal explicit strong stability preserving Runge-Kutta methods,
+           Journal of Computational and Applied Mathematics, Volume 412, 2022
+    """
+
+    order = 2
+    error_estimator_order = 1
+    n_stages = 3
+    C = torch.tensor([0, 0.5, 1.0])
+    A = torch.tensor(
+        [
+            [0, 0],
+            [0.5, 0],
+            [0.5, 0.5],
+        ]
+    )
+    B = torch.tensor([1 / 3, 1 / 3, 1 / 3])
+    # E = torch.tensor([1 / 3 - 4 / 9, 1 / 3 - 1 / 3, 1 / 3 - 2 / 9, 0])
+    E = torch.tensor([1 / 3 - 0.635564950337195, 1 / 3 - 0.033488381714827, 1 / 3 - 0.330946667947978, 0])
+
+
+class SSPRK332Stepper(RungeKuttaStepper):
+    """
+    Explicit SSP Runge-Kutta method of order (3,3)(2).
+
+    This uses the Shu-Osher pair of formulas [1]_. The error is controlled
+    assuming accuracy of the fourth-order method, but steps are taken using the
+    fifth-order accurate formula (local extrapolation is done).
+
+    References
+    ----------
+    .. [1] Imre Fekete, Sidafa Conde, John N. Shadid,
+           Embedded pairs for optimal explicit strong stability preserving Runge-Kutta methods,
+           Journal of Computational and Applied Mathematics, Volume 412, 2022
+    """
+
+    order = 3
+    error_estimator_order = 2
+    n_stages = 3
+    C = torch.tensor([0, 1.0, 0.5])
+    A = torch.tensor(
+        [
+            [0, 0],
+            [1.0, 0],
+            [0.25, 0.25],
+        ]
+    )
+    B = torch.tensor([1 / 6, 1 / 6, 2 / 3])
+    E = torch.tensor([1 / 6 - 0.291485418878409, 1 / 6 - 0.291485418878409, 2 / 3 - 0.417029162243181, 0])
+
+
+class SSPRK432Stepper(RungeKuttaStepper):
+    """
+    Explicit SSP Runge-Kutta method of order (4,3)(2).
+
+    This uses the Shu-Osher pair of formulas [1]_. The error is controlled
+    assuming accuracy of the fourth-order method, but steps are taken using the
+    fifth-order accurate formula (local extrapolation is done).
+
+    References
+    ----------
+    .. [1] Imre Fekete, Sidafa Conde, John N. Shadid,
+           Embedded pairs for optimal explicit strong stability preserving Runge-Kutta methods,
+           Journal of Computational and Applied Mathematics, Volume 412, 2022
+    """
+
+    order = 3
+    error_estimator_order = 2
+    n_stages = 4
+    C = torch.tensor([0, 0.5, 1, 0.5])
+    A = torch.tensor(
+        [
+            [0, 0, 0],
+            [0.5, 0, 0],
+            [0.5, 0.5, 0],
+            [1 / 6, 1 / 6, 1 / 6],
+        ]
+    )
+    B = torch.tensor([1 / 6, 1 / 6, 1 / 6, 1 / 2])
+    # E = torch.tensor([1 / 6 - 1 / 4, 1 / 6 - 1 / 4, 1 / 6 - 1 / 4, 1 / 2 - 1 / 4, 0])
+    E = torch.tensor([1 / 6 - 0.138870252716866, 1 / 6 - 0.722259494566267, 1 / 6 - 0.138870252716866, 1 / 2, 0])
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 # Implicit Steppers
 # ----------------------------------------------------------------------------------------------------------------------
@@ -385,11 +631,28 @@ class ImplicitStepper(ABC):
         self.rhs: Callable[[tensor], tensor] = rhs
 
     @abstractmethod
-    def _trhs_impl(self, u_prev: Optional[tensor], u_n: tensor, u_new: tensor, dt: float) -> tensor:
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
         pass
 
-    def trhs(self, u_prev: Optional[tensor], u_n: tensor, u_new: tensor, dt: float) -> tensor:
-        return self._trhs_impl(u_prev, u_n, u_new, dt)
+    def trhs(self, u_new: tensor, u_n: tensor, f_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
+        return self._trhs_impl(u_new, u_n, f_n, u_prev, dt)
+
+
+class BackwardEulerStepper(ImplicitStepper):
+    """
+    Base class for BackwardEuler stepper.
+    """
+
+    F: tensor = NotImplemented  # F_new
+
+    def __init__(self, rhs: Callable[[tensor], tensor], u_ref: tensor):
+        super().__init__(rhs)
+        self.F = tools.zerostorch(u_ref.shape)
+
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
+        del f_n, u_prev
+        self.F[...] = (u_n - u_new) / dt + self.rhs(u_new)
+        return self.F.clone()
 
 
 class DITRStepper(ImplicitStepper):
@@ -417,7 +680,7 @@ class DITRStepper(ImplicitStepper):
         )
 
     def _mul_P(self, F: tensor) -> None:
-        F[0, :].add_(F[1, :], alpha=self.beta)
+        F[0, ...].add_(F[1, ...], alpha=self.beta)
 
 
 class DITRU2R2Stepper(DITRStepper):
@@ -430,7 +693,7 @@ class DITRU2R2Stepper(DITRStepper):
         The temporal rhs of a single implicit step of the ODE using the DITR U2R2 method.
     """
 
-    def __init__(self, rhs: Callable[[tensor], tensor], u_ref: tensor, c2: float = 0.5, beta: float = 0.5):
+    def __init__(self, rhs: Callable[[tensor], tensor], u_ref: tensor, c2: float = 0.5, beta: float = 1.0):
         super().__init__(rhs)
         self.c2 = c2
         self._set_b(u_ref, c2)
@@ -447,29 +710,73 @@ class DITRU2R2Stepper(DITRStepper):
         self.beta = beta
         self.F = tools.zerostorch((2, *u_ref.shape), u_ref.device)
 
-    def _trhs_impl(self, u_prev: Optional[tensor], u_n: tensor, u_new: tensor, dt: float) -> tensor:
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
         """
         The temporal rhs of a single implicit step of the ODE using the DITR U2R2 method.
 
-        The form of u_prev, u_n, u_new should be u_{n-1}, u_{n}, tensor[u_{n+c2}, u_{n+1}]
+        The form of u_new, u_n, u_prev  should be tensor[u_{n+c2}, u_{n+1}], u_{n}, u_{n-1}.
 
         In U2R2, u_prev is not used.
         """
 
         del u_prev
         u_n_c2, u_n_1 = u_new[0, ...], u_new[1, ...]
+        f_n_c2 = self.rhs(u_n_c2)
+        f_n_1 = self.rhs(u_n_1)
         # F_n_c2
-        self.F[0, ...] = (
-            (self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt
-            + self.d[1] * self.rhs(u_n)
-            + self.d[2] * self.rhs(u_n_1)
-        )
+        self.F[0, ...] = (self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt + self.d[1] * f_n + self.d[2] * f_n_1
         # F_n_1
-        self.F[1, ...] = (
-            (u_n - u_n_1) / dt + self.b[1] * self.rhs(u_n) + self.b[2] * self.rhs(u_n_c2) + self.b[3] * self.rhs(u_n_1)
-        )
+        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * f_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
         self._mul_P(self.F)
-        return self.F
+        return self.F.clone()
+
+
+class DITRU2R1Stepper(DITRStepper):
+    """
+    DITR U2R1 stepper.
+
+    Functions
+    ---------
+    trhs(u, dt) -> tensor
+        The temporal rhs of a single implicit step of the ODE using the DITR U2R1 method.
+    """
+
+    def __init__(self, rhs: Callable[[tensor], tensor], u_ref: tensor, c2: float = 0.5, beta: float = 1.0):
+        super().__init__(rhs)
+        self.c2 = c2
+        self._set_b(u_ref, c2)
+        self.a = torch.tensor(
+            [0, 1.0 - (2.0 * c2 - (c2**2)), 2.0 * c2 - (c2**2)],
+            dtype=u_ref.dtype,
+            device=u_ref.device,
+        )
+        self.d = torch.tensor(
+            [0, 0, (c2**2) - c2],
+            dtype=u_ref.dtype,
+            device=u_ref.device,
+        )
+        self.beta = beta
+        self.F = tools.zerostorch((2, *u_ref.shape), u_ref.device)
+
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
+        """
+        The temporal rhs of a single implicit step of the ODE using the DITR U2R1 method.
+
+        The form of u_new, u_n, u_prev  should be tensor[u_{n+c2}, u_{n+1}], u_{n}, u_{n-1}.
+
+        In U2R1, u_prev is not used.
+        """
+
+        del u_prev
+        u_n_c2, u_n_1 = u_new[0, ...], u_new[1, ...]
+        f_n_c2 = self.rhs(u_n_c2)
+        f_n_1 = self.rhs(u_n_1)
+        # F_n_c2
+        self.F[0, ...] = (self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt + self.d[2] * f_n_1
+        # F_n_1
+        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * f_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
+        self._mul_P(self.F)
+        return self.F.clone()
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -482,9 +789,8 @@ class DualStepper:
         self,
         phy_stepper: ImplicitStepper,
         pseudo_stepper: ExplicitStepper,
-        u_ref: tensor,
         atol: float = 1e-6,
-        rtol: float = 1e-3,
+        rtol: float = 1e-6,
         max_pseudo_steps: int = 100,
     ):
         """
@@ -497,12 +803,10 @@ class DualStepper:
             The physical stepper for solving the ODE.
         pseudo_stepper : ExplicitStepper
             The pseudo stepper for solving the ODE.
-        u_ref : torch.Tensor
-            The reference state of the system.
         atol : float, optional
-            The absolute tolerance for the pseudo stepper, by default 1e-6
+            The absolute tolerance for the pseudo stepper, by default 1e-8
         rtol : float, optional
-            The relative tolerance for the pseudo stepper, by default 1e-3
+            The relative tolerance for the pseudo stepper, by default 1e-6
 
         """
         self.phy_stepper = phy_stepper
@@ -512,12 +816,12 @@ class DualStepper:
         self.max_pseudo_steps = max_pseudo_steps
         self.REF_STEP = 5  # Magic number from fluent
 
-        if isinstance(phy_stepper, DITRStepper):
-            self.u_new = tools.emptytorch((2, *u_ref.shape), u_ref.device)
+        if isinstance(phy_stepper, DITRStepper) or isinstance(phy_stepper, BackwardEulerStepper):
+            self.u_new = torch.empty_like(phy_stepper.F)
+            self.pseudo_dt = torch.empty_like(phy_stepper.F)
         else:
-            raise NotImplementedError("Only DITR stepper is supported for dual stepper's phy_stepper.")
+            raise NotImplementedError("Only implemented implicit stepper is supported for dual stepper's phy_stepper.")
 
-        self.pseudo_dt = torch.empty_like(u_ref)
         self.u_prev_needed = False
 
     def _not_converged(self, f_norm: float, f0_norm: float) -> bool:
@@ -553,35 +857,59 @@ class DualStepper:
         if (u_prev is None) and self.u_prev_needed:
             raise ValueError("u_prev is needed for this stepper.")
 
-        pseudo_rhs = functools.partial(self.phy_stepper.trhs, u_prev=u_prev, u_n=u, dt=dt)
-
-        if isinstance(self.pseudo_stepper, DITRStepper):
+        if isinstance(self.phy_stepper, DITRStepper):
             self.u_new[0, ...] = u
             self.u_new[1, ...] = u
+        elif isinstance(self.phy_stepper, BackwardEulerStepper):
+            self.u_new.copy_(u)
         else:
-            raise NotImplementedError("Only DITR stepper is supported for dual stepper's phy_stepper.")
+            raise NotImplementedError("Only implemented implicit stepper is supported for dual stepper's phy_stepper.")
+
+        if isinstance(self.phy_stepper, DITRStepper):
+            f_n = self.phy_stepper.rhs(u)
+        else:
+            f_n = None
+
+        pseudo_rhs = functools.partial(self.phy_stepper.trhs, u_n=u, f_n=f_n, u_prev=u_prev, dt=dt)
 
         u0 = self.u_new
         f0 = pseudo_rhs(u0)
 
         if isinstance(self.pseudo_stepper, RungeKuttaStepper):
-            self.pseudo_stepper.set_new_state(u0, f0, self.pseudo_dt, pseudo_rhs)
+            # self.pseudo_stepper.set_new_state(u0, f0, self.pseudo_dt, pseudo_rhs)
+            self.pseudo_stepper.set_new_state_sdt(u0, f0, pseudo_rhs)
         else:
             raise NotImplementedError("Only RungeKutta stepper is supported for dual stepper's pseudo_stepper.")
 
-        f = self.pseudo_stepper.f
-        f0_norm = torch.norm(f0.view(-1), p=2) / (f0.numel() ** 0.5)
-        f_norm = torch.norm(f.view(-1), p=2) / (f.numel() ** 0.5)
+        def __cal_norm(x: tensor) -> tensor:
+            return torch.norm(x.view(-1), p=float("inf"))
+            # return torch.norm(x[..., 0, :].reshape(-1), p=float("inf"))
+
+        f0_norm = __cal_norm(f0)
+        f_norm = __cal_norm(self.pseudo_stepper.f)
         cnt = 0
         while self._not_converged(f_norm, f0_norm) and cnt < self.max_pseudo_steps:
-            self.pseudo_stepper.step()
+            # self.pseudo_stepper.step()
+            self.pseudo_stepper.step_single_dt()
+            # self.pseudo_stepper.step_set_sdt(0.001)
             cnt += 1
-            f_norm = torch.norm(f.view(-1), p=2) / (f.numel() ** 0.5)
+            f_norm = __cal_norm(self.pseudo_stepper.f)
             if cnt <= self.REF_STEP:
                 f0_norm = max(f0_norm, f_norm)
+        #     print(f"{cnt}, {f_norm.item():.3e}, {f_norm.item() / f0_norm.item():.3e}", end="\r")
+        # print("")
+        # print(f"{cnt}, {f_norm.item():.3e}, {f_norm.item() / f0_norm.item():.3e}")
 
         if self._not_converged(f_norm, f0_norm) and cnt >= self.max_pseudo_steps:
-            warnings.warn("pseudo stepper touched max steps.")
+            # warnings.warn("pseudo stepper touched max steps.")
+            print("pseudo stepper touched max steps.")
+            pass
 
-        out[...] = self.u_new[1, ...]
+        u_prev.copy_(u)
+        if isinstance(self.phy_stepper, DITRStepper):
+            out.copy_(self.u_new[1, ...])
+        elif isinstance(self.phy_stepper, BackwardEulerStepper):
+            out.copy_(self.u_new)
+        else:
+            raise NotImplementedError("Only implemented implicit stepper is supported for dual stepper's phy_stepper.")
         return out

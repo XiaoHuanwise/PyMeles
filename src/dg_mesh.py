@@ -130,6 +130,7 @@ class DGMesh1D:
         self.face_lr_sign = np.zeros((self.num_faces, 2), dtype=np.int64)  # Left and right cells' normal sign of faces
         self.face_bd = np.empty(2, dtype=np.int64)
         self.face_inside = np.empty(self.num_faces - 2, dtype=np.int64)
+        self.periodic = False
 
         self._filled_cells = 0  # Filled cell counter
         self.device = None
@@ -196,6 +197,7 @@ class DGMesh1D:
         x_min: float,
         x_max: float,
         num_cells: int,
+        periodic: bool = False,
         device: torch.device = torch.device("cpu"),
     ):
         """
@@ -234,6 +236,7 @@ class DGMesh1D:
 
         # Set boundary
         mesh.set_boundary(np.array([0, mesh.num_faces - 1], dtype=np.int64))
+        mesh.periodic = periodic
 
         mesh.to_torch(device)
 

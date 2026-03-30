@@ -116,12 +116,14 @@ class DGField1D:
         self.face_fc = zerostorch((self.num_faces, self.num_vars), device)
         self.device = device
 
-    def set_u_face_lr(self):
+    def set_u_face_lr_with_u(self, u: torch.Tensor | None):
         # boardcast B to u for vectorized matmul
         # unsqueeze(-1) for declaration of column vector in matmul
         # (2, num_basis) @ (num_cells, num_vars, num_basis, 1)
         # -> (num_cells, num_vars, 2, 1)
-        u_cell_lr = torch.matmul(self.basis.B, self.u.unsqueeze(-1)).squeeze_(-1)
+        if u is None:
+            u = self.u
+        u_cell_lr = torch.matmul(self.basis.B, u.unsqueeze(-1)).squeeze_(-1)
         self.u_face_lr[0, :, :] = u_cell_lr[self.mesh.face_lr[:, 0], :, self.mesh.face_lr_map[:, 0]]
         self.u_face_lr[1, self.mesh.face_inside, :] = u_cell_lr[
             self.mesh.face_lr[self.mesh.face_inside, 1], :, self.mesh.face_lr_map[self.mesh.face_inside, 1]
@@ -129,6 +131,13 @@ class DGField1D:
 
     def set_transmission_bd_cond(self):
         self.u_face_lr[1, self.mesh.face_bd, :] = self.u_face_lr[0, self.mesh.face_bd, :]
+
+    def set_periodic_bd_cond(self):
+        # Deal with periodic boundary condition
+        # Because of the left priority of boundary process, the u_face_lr between bd are mirrored.
+        self.u_face_lr[1, self.mesh.face_bd[1], :] = self.u_face_lr[0, self.mesh.face_bd[0], :]
+        self.u_face_lr[0, self.mesh.face_bd[0], :] = self.u_face_lr[0, self.mesh.face_bd[1], :]
+        self.u_face_lr[1, self.mesh.face_bd[0], :] = self.u_face_lr[1, self.mesh.face_bd[1], :]
 
     def get_u_quad(self) -> torch.Tensor:
         # boardcast V to u for vectorized matmul
