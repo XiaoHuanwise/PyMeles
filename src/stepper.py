@@ -112,8 +112,8 @@ class RungeKuttaStepper(ExplicitStepper):
     # Multiply steps computed from asymptotic behaviour of errors by this.
     SAFETY = 0.9
 
-    MIN_FACTOR = 0.01  # Minimum allowed decrease in a step size.
-    MAX_FACTOR = 5  # Maximum allowed increase in a step size.
+    MIN_FACTOR = 0.98  # Minimum allowed decrease in a step size.
+    MAX_FACTOR = 1.02  # Maximum allowed increase in a step size.
     MAX_GROWTH = 10.0
 
     ALPHA = 0.7
@@ -211,12 +211,16 @@ class RungeKuttaStepper(ExplicitStepper):
     #     )
     #     return torch.minimum(torch.minimum(100 * h0, h1), torch.full_like(h0, self.max_step), out=dt)
 
-    def set_new_state(self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor]) -> None:
+    def set_new_state(
+        self, u0: tensor, f0: tensor, dt: tensor, rhs: Callable[[tensor], tensor], phy_dt: tensor
+    ) -> None:
         self.u = u0
         self.f = f0
         self.rhs = rhs
         # self._select_initial_step(u0, f0, dt, rhs)
         single_dt = self._select_initial_step_sdt(u0, f0, rhs)
+        self.max_step = phy_dt
+        single_dt = min(single_dt, phy_dt)
         dt.fill_(single_dt)
         self.dt = dt
         self.init_dt = dt.clone()
@@ -252,16 +256,9 @@ class RungeKuttaStepper(ExplicitStepper):
         min_step, max_step = self.min_step, self.max_step
         rtol, atol = self.rtol, self.atol
 
-        if torch.any(dt < min_step):
-            torch.maximum(dt, torch.tensor(min_step, dtype=dt.dtype, device=dt.device), out=dt)
-        if torch.any(dt > max_step):
-            torch.minimum(dt, torch.tensor(max_step, dtype=dt.dtype, device=dt.device), out=dt)
-
         # Apply PI control
         # while not step_accepted.all():
         # Check if dt is too small for any unaccepted DOF
-        if torch.any(dt < min_step):
-            raise ValueError("dt below the min_step without enough accuracy in RK")
 
         # Perform a single Runge-Kutta step
         u_new, f_new = self._rk_step(u, f, dt, rhs)
@@ -316,6 +313,9 @@ class RungeKuttaStepper(ExplicitStepper):
         torch.minimum(dt, self.MAX_GROWTH * self.init_dt, out=dt)
         torch.maximum(dt, self.init_dt / self.MAX_GROWTH, out=dt)
 
+        dt[dt < min_step] = min_step
+        dt[dt > max_step] = max_step
+
         self.u[...] = u_new
         self.f = f_new
         self.error_norm_prev = error_norm
@@ -344,12 +344,14 @@ class RungeKuttaStepper(ExplicitStepper):
         self.dt = min(100 * h0, h1, self.max_step)
         return self.dt
 
-    def set_new_state_sdt(self, u0: tensor, f0: tensor, rhs: Callable[[tensor], tensor]) -> None:
+    def set_new_state_sdt(self, u0: tensor, f0: tensor, rhs: Callable[[tensor], tensor], phy_dt: float) -> None:
         self.u = u0
         self.f = f0
         self.rhs = rhs
         self.dt = None
         self._select_initial_step_sdt(u0, f0, rhs)
+        self.max_step = phy_dt
+        self.dt = min(self.dt, self.max_step)
         self.init_dt = self.dt
         self.error_norm_prev = 1.0
 
@@ -363,9 +365,6 @@ class RungeKuttaStepper(ExplicitStepper):
         min_step, max_step = self.min_step, self.max_step
         rtol, atol = self.rtol, self.atol
 
-        dt = max(dt, min_step)
-        dt = min(dt, max_step)
-
         # # Initialize accept/reject states
         # step_accepted = False
         # step_rejected = False
@@ -373,8 +372,6 @@ class RungeKuttaStepper(ExplicitStepper):
         # Apply PI control
         # while not step_accepted:
         # Check if dt is too small for any unaccepted DOF
-        if dt < min_step:
-            raise ValueError("dt below the min_step without enough accuracy in RK")
 
         # Perform a single Runge-Kutta step
         u_new, f_new = self._rk_step(u, f, dt, rhs)
@@ -394,11 +391,6 @@ class RungeKuttaStepper(ExplicitStepper):
                 )
 
             dt *= factor
-
-            # if step_rejected:
-            #     factor = min(factor, 1.0)
-
-            # step_accepted = True
         else:
             dt *= max(
                 self.MIN_FACTOR,
@@ -406,9 +398,11 @@ class RungeKuttaStepper(ExplicitStepper):
                 * (error_norm ** (-self.ALPHA * self.error_exponent))
                 * (self.error_norm_prev ** (self.BETA * self.error_exponent)),
             )
-            # step_rejected = True
 
         dt = min(dt, self.MAX_GROWTH * self.init_dt)
+
+        dt = max(dt, min_step)
+        dt = min(dt, max_step)
 
         self.u[...] = u_new
         self.f = f_new
@@ -931,8 +925,8 @@ class DualStepper:
         f0 = pseudo_rhs(u0)
 
         if isinstance(self.pseudo_stepper, RungeKuttaStepper):
-            # self.pseudo_stepper.set_new_state(u0, f0, self.pseudo_dt, pseudo_rhs)
-            self.pseudo_stepper.set_new_state_sdt(u0, f0, pseudo_rhs)
+            # self.pseudo_stepper.set_new_state(u0, f0, self.pseudo_dt, pseudo_rhs, dt)
+            self.pseudo_stepper.set_new_state_sdt(u0, f0, pseudo_rhs, dt)
         else:
             raise NotImplementedError("Only RungeKutta stepper is supported for dual stepper's pseudo_stepper.")
 
