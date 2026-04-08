@@ -31,3 +31,4 @@ __pycache__
 # for claude code
 AGENTS.md
 memory_and_plan
+scripts
