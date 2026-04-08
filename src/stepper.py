@@ -949,8 +949,10 @@ class DualStepper:
         f0 = pseudo_rhs(u0)
 
         if isinstance(self.pseudo_stepper, RungeKuttaStepper):
-            # self.pseudo_stepper.set_new_state(u0, f0, self.pseudo_dt, pseudo_rhs, dt)
-            self.pseudo_stepper.set_new_state_sdt(u0, f0, pseudo_rhs, dt)
+            if self.is_single_dt:
+                self.pseudo_stepper.set_new_state_sdt(u0, f0, pseudo_rhs, dt)
+            else:
+                self.pseudo_stepper.set_new_state(u0, f0, self.pseudo_dt, pseudo_rhs, dt)
         else:
             raise NotImplementedError("Only RungeKutta stepper is supported for dual stepper's pseudo_stepper.")
 
