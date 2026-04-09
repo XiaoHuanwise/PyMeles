@@ -642,11 +642,11 @@ class ImplicitStepper(ABC):
         self.rhs: Callable[[tensor], tensor] = rhs
 
     @abstractmethod
-    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, R_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
         pass
 
-    def trhs(self, u_new: tensor, u_n: tensor, f_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
-        return self._trhs_impl(u_new, u_n, f_n, u_prev, dt)
+    def trhs(self, u_new: tensor, u_n: tensor, R_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
+        return self._trhs_impl(u_new, u_n, R_n, u_prev, dt)
 
 
 class BackwardEulerStepper(ImplicitStepper):
@@ -660,8 +660,8 @@ class BackwardEulerStepper(ImplicitStepper):
         super().__init__(rhs)
         self.F = tools.zerostorch(u_ref.shape)
 
-    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
-        del f_n, u_prev
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, R_n: tensor | None, u_prev: tensor | None, dt: float) -> tensor:
+        del R_n, u_prev
         self.F[...] = (u_n - u_new) / dt + self.rhs(u_new)
         return self.F.clone()
 
@@ -721,7 +721,7 @@ class DITRU2R2Stepper(DITRStepper):
         self.beta = beta
         self.F = tools.zerostorch((2, *u_ref.shape), u_ref.device)
 
-    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, R_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
         """
         The temporal rhs of a single implicit step of the ODE using the DITR U2R2 method.
 
@@ -735,9 +735,9 @@ class DITRU2R2Stepper(DITRStepper):
         f_n_c2 = self.rhs(u_n_c2)
         f_n_1 = self.rhs(u_n_1)
         # F_n_c2
-        self.F[0, ...] = (self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt + self.d[1] * f_n + self.d[2] * f_n_1
+        self.F[0, ...] = (self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt + self.d[1] * R_n + self.d[2] * f_n_1
         # F_n_1
-        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * f_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
+        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * R_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
         self._mul_P(self.F)
         return self.F.clone()
 
@@ -769,7 +769,7 @@ class DITRU2R1Stepper(DITRStepper):
         self.beta = beta
         self.F = tools.zerostorch((2, *u_ref.shape), u_ref.device)
 
-    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, R_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
         """
         The temporal rhs of a single implicit step of the ODE using the DITR U2R1 method.
 
@@ -785,7 +785,7 @@ class DITRU2R1Stepper(DITRStepper):
         # F_n_c2
         self.F[0, ...] = (self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt + self.d[2] * f_n_1
         # F_n_1
-        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * f_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
+        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * R_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
         self._mul_P(self.F)
         return self.F.clone()
 
@@ -825,7 +825,7 @@ class DITRU3R1Stepper(DITRStepper):
         self.beta = beta
         self.F = tools.zerostorch((2, *u_ref.shape), u_ref.device)
 
-    def _trhs_impl(self, u_new: tensor, u_n: tensor, f_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
+    def _trhs_impl(self, u_new: tensor, u_n: tensor, R_n: tensor, u_prev: tensor | None, dt: float) -> tensor:
         """
         The temporal rhs of a single implicit step of the ODE using the DITR U2R1 method.
 
@@ -840,7 +840,7 @@ class DITRU3R1Stepper(DITRStepper):
         # F_n_c2
         self.F[0, ...] = (self.a[0] * u_prev + self.a[1] * u_n + self.a[2] * u_n_1 - u_n_c2) / dt + self.d[2] * f_n_1
         # F_n_1
-        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * f_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
+        self.F[1, ...] = (u_n - u_n_1) / dt + self.b[1] * R_n + self.b[2] * f_n_c2 + self.b[3] * f_n_1
         self._mul_P(self.F)
         return self.F.clone()
 
@@ -939,11 +939,11 @@ class DualStepper:
             raise NotImplementedError("Only implemented implicit stepper is supported for dual stepper's phy_stepper.")
 
         if isinstance(self.phy_stepper, DITRStepper):
-            f_n = self.phy_stepper.rhs(u)
+            R_n = self.phy_stepper.rhs(u)
         else:
-            f_n = None
+            R_n = None
 
-        pseudo_rhs = functools.partial(self.phy_stepper.trhs, u_n=u, f_n=f_n, u_prev=u_prev, dt=dt)
+        pseudo_rhs = functools.partial(self.phy_stepper.trhs, u_n=u, f_n=R_n, u_prev=u_prev, dt=dt)
 
         u0 = self.u_new
         f0 = pseudo_rhs(u0)
